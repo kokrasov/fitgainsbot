@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import random
 
 from app.models.user import User, ExperienceLevel
-from app.models.workout import WorkoutPlan, Exercise, MuscleGroup, ExerciseType, Equipment
+from app.models.workout import WorkoutPlan, Exercise, MuscleGroup, ExerciseType, Equipment, workout_exercise
 
 
 async def generate_workout_plan(session: AsyncSession, user: User) -> WorkoutPlan:
@@ -122,7 +122,7 @@ async def get_exercises_for_user(session: AsyncSession, user: User) -> list[Exer
 async def add_fullbody_workout(session: AsyncSession, workout_plan: WorkoutPlan, exercise_groups: dict) -> None:
     """
     Добавляет полнотелую тренировку (все группы мышц в одной тренировке)
-    
+
     :param session: Сессия БД
     :param workout_plan: План тренировок
     :param exercise_groups: Словарь с упражнениями, сгруппированными по группам мышц
@@ -137,7 +137,7 @@ async def add_fullbody_workout(session: AsyncSession, workout_plan: WorkoutPlan,
         MuscleGroup.TRICEPS.value,
         MuscleGroup.ABS.value
     ]
-    
+
     # Выбираем по одному упражнению из каждой основной группы мышц
     selected_exercises = []
     for group in main_muscle_groups:
@@ -145,15 +145,30 @@ async def add_fullbody_workout(session: AsyncSession, workout_plan: WorkoutPlan,
             # Выбираем случайное упражнение из группы
             exercise = random.choice(exercise_groups[group])
             selected_exercises.append(exercise)
-    
-    # Добавляем выбранные упражнения в план тренировок
-    workout_plan.exercises.extend(selected_exercises)
+
+    # Добавляем выбранные упражнения в план тренировок через прямую вставку в ассоциативную таблицу
+    from app.models.workout import workout_exercise
+
+    for i, exercise in enumerate(selected_exercises):
+        # Добавляем связь между планом тренировки и упражнением
+        await session.execute(
+            workout_exercise.insert().values(
+                workout_plan_id=workout_plan.id,
+                exercise_id=exercise.id,
+                sets=3,  # Дефолтные значения
+                reps="8-12",
+                rest=90,
+                order=i  # Порядок выполнения
+            )
+        )
+
+    await session.commit()
 
 
 async def add_upper_lower_split(session: AsyncSession, workout_plan: WorkoutPlan, exercise_groups: dict) -> None:
     """
     Добавляет тренировки по схеме верх/низ
-    
+
     :param session: Сессия БД
     :param workout_plan: План тренировок
     :param exercise_groups: Словарь с упражнениями, сгруппированными по группам мышц
@@ -166,14 +181,14 @@ async def add_upper_lower_split(session: AsyncSession, workout_plan: WorkoutPlan
         MuscleGroup.BICEPS.value,
         MuscleGroup.TRICEPS.value
     ]
-    
+
     # Определяем группы мышц для нижней части тела
     lower_body_groups = [
         MuscleGroup.LEGS.value,
         MuscleGroup.CALVES.value,
         MuscleGroup.ABS.value
     ]
-    
+
     # Выбираем упражнения для верхней части тела
     upper_body_exercises = []
     for group in upper_body_groups:
@@ -182,7 +197,7 @@ async def add_upper_lower_split(session: AsyncSession, workout_plan: WorkoutPlan
             num_exercises = min(len(exercise_groups[group]), 2)
             exercises = random.sample(exercise_groups[group], num_exercises)
             upper_body_exercises.extend(exercises)
-    
+
     # Выбираем упражнения для нижней части тела
     lower_body_exercises = []
     for group in lower_body_groups:
@@ -191,16 +206,44 @@ async def add_upper_lower_split(session: AsyncSession, workout_plan: WorkoutPlan
             num_exercises = min(len(exercise_groups[group]), 3)
             exercises = random.sample(exercise_groups[group], num_exercises)
             lower_body_exercises.extend(exercises)
-    
-    # Добавляем выбранные упражнения в план тренировок
-    workout_plan.exercises.extend(upper_body_exercises)
-    workout_plan.exercises.extend(lower_body_exercises)
+
+    # Добавляем выбранные упражнения в план тренировок через прямую вставку в ассоциативную таблицу
+    from app.models.workout import workout_exercise
+
+    # Добавляем упражнения для верхней части тела (верхний день)
+    for i, exercise in enumerate(upper_body_exercises):
+        await session.execute(
+            workout_exercise.insert().values(
+                workout_plan_id=workout_plan.id,
+                exercise_id=exercise.id,
+                sets=3,  # Дефолтные значения
+                reps="8-12",
+                rest=90,
+                order=i  # Порядок выполнения
+            )
+        )
+
+    # Добавляем упражнения для нижней части тела (нижний день)
+    for i, exercise in enumerate(lower_body_exercises):
+        await session.execute(
+            workout_exercise.insert().values(
+                workout_plan_id=workout_plan.id,
+                exercise_id=exercise.id,
+                sets=3,  # Дефолтные значения
+                reps="8-12",
+                rest=90,
+                order=i + len(upper_body_exercises)  # Продолжаем нумерацию
+            )
+        )
+
+    await session.commit()
 
 
-async def add_muscle_group_split(session: AsyncSession, workout_plan: WorkoutPlan, exercise_groups: dict, days_per_week: int) -> None:
+async def add_muscle_group_split(session: AsyncSession, workout_plan: WorkoutPlan, exercise_groups: dict,
+                                 days_per_week: int) -> None:
     """
     Добавляет тренировки по схеме разделения по группам мышц
-    
+
     :param session: Сессия БД
     :param workout_plan: План тренировок
     :param exercise_groups: Словарь с упражнениями, сгруппированными по группам мышц
@@ -241,10 +284,11 @@ async def add_muscle_group_split(session: AsyncSession, workout_plan: WorkoutPla
             "День 2": [MuscleGroup.BACK.value, MuscleGroup.BICEPS.value, MuscleGroup.FOREARMS.value],
             "День 3": [MuscleGroup.LEGS.value, MuscleGroup.CALVES.value, MuscleGroup.ABS.value]
         }
-    
+
     # Выбираем упражнения для каждого дня
     all_selected_exercises = []
-    
+    day_exercises_mapping = {}
+
     for day, muscle_groups in split_scheme.items():
         day_exercises = []
         for group in muscle_groups:
@@ -253,11 +297,31 @@ async def add_muscle_group_split(session: AsyncSession, workout_plan: WorkoutPla
                 num_exercises = min(len(exercise_groups[group]), 3)
                 exercises = random.sample(exercise_groups[group], num_exercises)
                 day_exercises.extend(exercises)
-        
+
+        day_exercises_mapping[day] = day_exercises
         all_selected_exercises.extend(day_exercises)
-    
-    # Добавляем выбранные упражнения в план тренировок
-    workout_plan.exercises.extend(all_selected_exercises)
+
+    # Добавляем выбранные упражнения в план тренировок через прямую вставку в ассоциативную таблицу
+    from app.models.workout import workout_exercise
+
+    # Итоговая позиция для order
+    current_order = 0
+
+    for day, exercises in day_exercises_mapping.items():
+        for exercise in exercises:
+            await session.execute(
+                workout_exercise.insert().values(
+                    workout_plan_id=workout_plan.id,
+                    exercise_id=exercise.id,
+                    sets=3,  # Дефолтные значения
+                    reps="8-12",
+                    rest=90,
+                    order=current_order  # Порядок выполнения
+                )
+            )
+            current_order += 1
+
+    await session.commit()
 
 
 async def create_default_exercises(session: AsyncSession) -> None:
