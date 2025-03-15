@@ -1,0 +1,6 @@
+echo "fitgains/" >> .gitignore  # ваша папка с виртуальным окружением
+echo "__pycache__/" >> .gitignore
+echo "*.pyc" >> .gitignore
+echo "*.pyo" >> .gitignore
+echo ".env" >> .gitignore
+echo "*.db" >> .gitignore
