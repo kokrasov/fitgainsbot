@@ -60,6 +60,9 @@ class User(BaseModel):
     # Параметры тренировок
     has_gym_access = Column(Boolean, default=False)
     training_days_per_week = Column(Integer, default=3)
+    workout_plans = relationship("WorkoutPlan", back_populates="user", cascade="all, delete-orphan")
+
+
     
     # Статус подписки
     is_premium = Column(Boolean, default=False)

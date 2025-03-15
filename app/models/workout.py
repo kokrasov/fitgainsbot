@@ -80,7 +80,7 @@ class WorkoutPlan(BaseModel):
     is_active = Column(Boolean, default=True)
     
     # Связи с другими таблицами
-    user = relationship("User", back_populates="workouts")
+    user = relationship("User", back_populates="workout_plans")
     exercises = relationship("Exercise", secondary=workout_exercise, back_populates="workout_plans")
     workout_sessions = relationship("Workout", back_populates="workout_plan", cascade="all, delete-orphan")
     

@@ -1,3 +1,4 @@
+import signal
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
@@ -5,7 +6,7 @@ from aiogram.enums.parse_mode import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.config import settings
-from app.utils.db import init_models
+from app.utils.db import init_models, engine
 from app.handlers import start, registration, profile, workout, nutrition, progress, gamification, subscription
 
 
@@ -61,9 +62,25 @@ async def main() -> None:
     await register_handlers(dp)
     await register_middlewares(dp)
     
+    # Добавьте обработчик корректного завершения
+    async def on_shutdown(sig):
+        logging.info(f"Получен сигнал {sig.name}, завершение работы...")
+        # Закрываем соединения с базой данных
+        await engine.dispose()
+        # Останавливаем polling
+        await dp.stop_polling()
+    
+    # Регистрируем обработчики сигналов
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        asyncio.get_event_loop().add_signal_handler(
+            sig, lambda s=sig: asyncio.create_task(on_shutdown(s))
+        )
+    
     # Запуск бота
     logging.info("Starting FitGains Bot")
     await dp.start_polling(bot)
+
+
 
 
 if __name__ == "__main__":

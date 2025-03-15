@@ -5,72 +5,122 @@ import random
 import math
 
 from app.models.user import User, ActivityLevel, DietType
-from app.models.nutrition import NutritionPlan, Meal, MealType, Recipe, Product
+from app.models.nutrition import NutritionPlan, Meal, MealType, Recipe, Product, meal_recipe
+
+
+async def calculate_recipe_calories(session, recipe):
+    """Асинхронный расчет калорий для рецепта"""
+    query = select(Product).join(recipe_product).filter(recipe_product.c.recipe_id == recipe.id)
+    result = await session.execute(query)
+    products = result.scalars().all()
+
+    if not products:
+        return 0
+
+    # Упрощенный расчет средних значений
+    return sum(product.calories for product in products) / len(products) * 100
+
+
+async def calculate_recipe_macros(session, recipe):
+    """Асинхронный расчет макронутриентов для рецепта"""
+    query = select(Product).join(recipe_product).filter(recipe_product.c.recipe_id == recipe.id)
+    result = await session.execute(query)
+    products = result.scalars().all()
+
+    if not products:
+        return {"protein": 0, "fat": 0, "carbs": 0}
+
+    # Упрощенный расчет средних значений
+    protein = sum(product.protein for product in products) / len(products)
+    fat = sum(product.fat for product in products) / len(products)
+    carbs = sum(product.carbs for product in products) / len(products)
+
+    return {"protein": protein, "fat": fat, "carbs": carbs}
 
 
 def calculate_calories_and_macros(user: User) -> tuple[int, dict]:
     """
     Рассчитывает целевые калории и макронутриенты на основе данных пользователя
-    
+
     :param user: Пользователь
     :return: Кортеж (целевые калории, словарь с макронутриентами)
     """
+    # Проверяем наличие обязательных данных
+    if not user.weight or not user.height or not user.age or not user.gender:
+        # Возвращаем значения по умолчанию, если данных недостаточно
+        return 2500, {'protein': 120, 'fat': 80, 'carbs': 300}
+
     # Расчет базового метаболизма по формуле Миффлина-Сан Жеора
     if user.gender == 'male':
         bmr = 10 * user.weight + 6.25 * user.height - 5 * user.age + 5
     else:
         bmr = 10 * user.weight + 6.25 * user.height - 5 * user.age - 161
-    
+
     # Коэффициент активности
     activity_multipliers = {
-        ActivityLevel.SEDENTARY: 1.2,         # Малоподвижный образ жизни
+        ActivityLevel.SEDENTARY: 1.2,  # Малоподвижный образ жизни
         ActivityLevel.LIGHTLY_ACTIVE: 1.375,  # Тренировки 1-3 раза в неделю
         ActivityLevel.MODERATELY_ACTIVE: 1.55,  # Тренировки 3-5 раз в неделю
-        ActivityLevel.VERY_ACTIVE: 1.725,     # Тренировки 6-7 раз в неделю
-        ActivityLevel.EXTREMELY_ACTIVE: 1.9   # Тренировки 2 раза в день
+        ActivityLevel.VERY_ACTIVE: 1.725,  # Тренировки 6-7 раз в неделю
+        ActivityLevel.EXTREMELY_ACTIVE: 1.9  # Тренировки 2 раза в день
     }
-    
-    # Получаем множитель активности из словаря
+
+    # Получаем множитель активности из словаря (по умолчанию 1.375)
     activity_multiplier = activity_multipliers.get(user.activity_level, 1.375)
-    
+
     # Расчет суточных потребностей в калориях (TDEE)
     tdee = bmr * activity_multiplier
-    
-    # Определяем, набираем ли мы массу (профицит калорий) или поддерживаем (нейтральный калораж)
-    if user.target_weight > user.weight:
+
+    # Определяем цель на основе текущего и целевого веса
+    # Если целевой вес не задан, используем текущий
+    target_weight = user.target_weight or user.weight
+
+    if target_weight > user.weight:
         # Для набора массы добавляем 10-15% калорий
         target_calories = tdee * 1.15
+    elif target_weight < user.weight:
+        # Для снижения веса уменьшаем на 15-20%
+        target_calories = tdee * 0.85
     else:
         # Для поддержания веса используем текущие потребности
         target_calories = tdee
-    
+
     # Округляем до ближайших 50 калорий
     target_calories = round(target_calories / 50) * 50
-    
-    # Расчет макронутриентов (белки, жиры, углеводы)
-    
-    # Белок: 1.6-2.2 г на кг веса для набора массы
-    protein_per_kg = 2.0
+
+    # Расчет макронутриентов с учетом цели
+    if target_weight > user.weight:
+        # При наборе массы - больше белка и углеводов
+        protein_per_kg = 2.0
+        fat_percentage = 0.25  # 25% калорий из жиров
+    elif target_weight < user.weight:
+        # При снижении веса - больше белка, меньше жиров и углеводов
+        protein_per_kg = 2.2
+        fat_percentage = 0.30  # 30% калорий из жиров
+    else:
+        # При поддержании - умеренное количество всех нутриентов
+        protein_per_kg = 1.8
+        fat_percentage = 0.30  # 30% калорий из жиров
+
+    # Расчет целевого потребления белка на основе веса
     target_protein = round(user.weight * protein_per_kg)
-    
-    # Жиры: 20-35% от общего количества калорий
-    # Для набора массы используем нижнюю границу, чтобы оставить больше места для углеводов
-    fat_percentage = 0.25  # 25% калорий из жиров
+
+    # Расчет целевого потребления жиров
     target_fat = round((target_calories * fat_percentage) / 9)  # 9 калорий на грамм жира
-    
-    # Углеводы: оставшиеся калории
+
+    # Расчет целевого потребления углеводов (оставшиеся калории)
     protein_calories = target_protein * 4  # 4 калории на грамм белка
     fat_calories = target_fat * 9  # 9 калорий на грамм жира
     remaining_calories = target_calories - protein_calories - fat_calories
     target_carbs = round(remaining_calories / 4)  # 4 калории на грамм углеводов
-    
+
     # Создаем словарь с целевыми макронутриентами
     macros = {
         'protein': target_protein,
         'fat': target_fat,
         'carbs': target_carbs
     }
-    
+
     return int(target_calories), macros
 
 
@@ -214,88 +264,76 @@ async def add_meals_to_plan(session: AsyncSession, nutrition_plan: NutritionPlan
         await add_recipes_to_meal(session, meal, recipes, meal_calories, meal_protein, meal_fat, meal_carbs)
 
 
-async def add_recipes_to_meal(session: AsyncSession, meal: Meal, recipes: list[Recipe], target_calories: float, target_protein: float, target_fat: float, target_carbs: float) -> None:
+async def add_recipes_to_meal(session, meal, recipes, target_calories, target_protein, target_fat, target_carbs):
     """
     Подбирает рецепты для приема пищи с учетом целевых калорий и макронутриентов
-    
-    :param session: Сессия БД
-    :param meal: Прием пищи
-    :param recipes: Список рецептов
-    :param target_calories: Целевые калории для приема пищи
-    :param target_protein: Целевой белок для приема пищи
-    :param target_fat: Целевые жиры для приема пищи
-    :param target_carbs: Целевые углеводы для приема пищи
     """
     # Фильтруем рецепты по типу приема пищи
     suitable_recipes = filter_recipes_by_meal_type(recipes, meal.meal_type)
-    
+
     if not suitable_recipes:
         # Если подходящих рецептов нет, берем все рецепты
         suitable_recipes = recipes
-    
-    # Сортируем рецепты так, чтобы они примерно соответствовали целевым показателям
-    sorted_recipes = sorted(suitable_recipes, key=lambda r: abs(r.total_calories - target_calories))
-    
-    # Выбираем 1-3 рецепта для приема пищи
-    selected_recipes = []
-    current_calories = 0
-    current_protein = 0
-    current_fat = 0
-    current_carbs = 0
-    
-    # Сначала выбираем один основной рецепт, наиболее подходящий по калориям
+
+    # Создаем список с калориями для сортировки
+    recipes_with_calories = []
+    for recipe in suitable_recipes:
+        calories = await calculate_recipe_calories(session, recipe)
+        recipes_with_calories.append((recipe, calories))
+
+    # Сортируем рецепты по близости к целевым калориям
+    sorted_recipes = sorted(recipes_with_calories, key=lambda item: abs(item[1] - target_calories))
+
+    # Выбираем первый рецепт из отсортированного списка и добавляем его к приему пищи
+    import random
     if sorted_recipes:
-        main_recipe = sorted_recipes[0]
-        selected_recipes.append(main_recipe)
-        
-        current_calories += main_recipe.total_calories
-        macros = main_recipe.macros
-        current_protein += macros['protein']
-        current_fat += macros['fat']
-        current_carbs += macros['carbs']
-    
-    # Если мы не достигли целевых показателей, добавляем еще рецепты
-    if (current_calories < target_calories * 0.8 and len(sorted_recipes) > 1 and
-            meal.meal_type not in [MealType.SNACK, MealType.PRE_WORKOUT, MealType.POST_WORKOUT]):
-        
-        # Сортируем оставшиеся рецепты по тому, насколько они дополняют текущий набор
-        remaining_calories = target_calories - current_calories
-        remaining_recipes = [r for r in sorted_recipes if r not in selected_recipes]
-        
-        remaining_recipes.sort(key=lambda r: abs(r.total_calories - remaining_calories))
-        
-        # Добавляем еще один рецепт
-        if remaining_recipes:
-            second_recipe = remaining_recipes[0]
-            selected_recipes.append(second_recipe)
-            
-            current_calories += second_recipe.total_calories
-            macros = second_recipe.macros
-            current_protein += macros['protein']
-            current_fat += macros['fat']
-            current_carbs += macros['carbs']
-    
-    # Добавляем выбранные рецепты в прием пищи
-    for recipe in selected_recipes:
-        # Добавляем связь между приемом пищи и рецептом
-        meal.recipes.append(recipe)
-    
+        # Выбираем случайный рецепт из топ-3 наиболее подходящих по калориям
+        top_recipes = sorted_recipes[:min(3, len(sorted_recipes))]
+        main_recipe, main_calories = random.choice(top_recipes)
+
+        # Избегаем ленивой загрузки meal.recipes, добавляя связь напрямую в таблицу
+        await session.execute(
+            meal_recipe.insert().values(
+                meal_id=meal.id,
+                recipe_id=main_recipe.id,
+                servings=1.0
+            )
+        )
+
     await session.commit()
 
 
 def filter_recipes_by_meal_type(recipes: list[Recipe], meal_type: MealType) -> list[Recipe]:
     """
     Фильтрует рецепты по типу приема пищи
-    
+
     :param recipes: Список рецептов
     :param meal_type: Тип приема пищи
     :return: Отфильтрованный список рецептов
     """
-    # В будущем здесь можно реализовать более сложную логику для фильтрации
-    # рецептов в зависимости от типа приема пищи
-    
-    # Пока просто возвращаем все рецепты
-    return recipes
+    # Разделяем рецепты по типам приемов пищи
+    meal_type_recipes = {
+        MealType.BREAKFAST: ["Протеиновая овсянка с фруктами", "Омлет с овощами", "Творожная запеканка"],
+        MealType.LUNCH: ["Куриная грудка с рисом и овощами", "Гречка с говядиной", "Лосось с сладким картофелем"],
+        MealType.DINNER: ["Творог с ягодами и орехами", "Омлет с сыром", "Салат с куриной грудкой"],
+        MealType.SNACK: ["Протеиновый коктейль с бананом", "Греческий йогурт с орехами", "Авокадо-тост"]
+    }
+
+    # Если для типа приема пищи нет специальных рецептов, используем все рецепты
+    if meal_type not in meal_type_recipes:
+        return recipes
+
+    # Получаем названия рецептов для данного типа приема пищи
+    suitable_recipe_names = meal_type_recipes[meal_type]
+
+    # Фильтруем рецепты по названию
+    suitable_recipes = [recipe for recipe in recipes if recipe.name in suitable_recipe_names]
+
+    # Если подходящих рецептов нет, возвращаем все рецепты
+    if not suitable_recipes:
+        return recipes
+
+    return suitable_recipes
 
 
 def get_meal_time(meal_type: MealType) -> str:
@@ -821,19 +859,22 @@ async def create_default_recipes(session: AsyncSession) -> None:
             (products["avocado"], 100),  # 100г авокадо
         ]
     }
-    
+
     # Получаем все рецепты из базы данных
     all_recipes = (await session.execute(select(Recipe))).scalars().all()
-    
+
     # Связываем рецепты с продуктами
     for recipe in all_recipes:
         if recipe.name in recipe_products:
             for product, amount in recipe_products[recipe.name]:
-                # Создаем связь между рецептом и продуктом
-                recipe.recipe_product_associations.append(RecipeProduct(
-                    product=product,
-                    amount=amount
-                ))
+                # Создаем запись в ассоциативной таблице
+                await session.execute(
+                    recipe_product.insert().values(
+                        recipe_id=recipe.id,
+                        product_id=product.id,
+                        amount=amount
+                    )
+                )
     
     await session.commit()
 

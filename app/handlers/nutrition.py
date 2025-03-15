@@ -1,3 +1,5 @@
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
@@ -5,11 +7,12 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from sqlalchemy.orm import selectinload
+from aiogram.enums.parse_mode import ParseMode
 from datetime import datetime, date
 import json
 
 from app.models.user import User
-from app.models.nutrition import NutritionPlan, Meal, MealType, Recipe, Product
+from app.models.nutrition import NutritionPlan, Meal, MealType, Recipe, Product, meal_recipe
 from app.keyboards.inline import nutrition_menu_keyboard, back_keyboard, confirmation_keyboard, main_menu_keyboard
 from app.utils.db import get_session
 from app.services.nutrition_service import generate_nutrition_plan, calculate_calories_and_macros
@@ -91,8 +94,13 @@ async def process_my_nutrition_plan(callback: CallbackQuery, session: AsyncSessi
         text += f"Углеводы: {nutrition_plan.carbs_target} г\n\n"
         
         # Добавляем информацию о приемах пищи
-        meals = nutrition_plan.meals
-        
+        from sqlalchemy import select  # Добавьте в импорты, если еще не импортировано
+        from app.models.nutrition import Meal  # Добавьте в импорты
+
+        meals_query = select(Meal).where(Meal.nutrition_plan_id == nutrition_plan.id)
+        result = await session.execute(meals_query)
+        meals = result.scalars().all()
+
         if meals:
             text += f"<b>Приемы пищи:</b>\n"
             
@@ -179,92 +187,78 @@ async def process_update_nutrition_plan(callback: CallbackQuery, state: FSMConte
 
 @router.callback_query(F.data == "generate_nutrition_plan")
 async def process_generate_nutrition_plan(callback: CallbackQuery, session: AsyncSession):
-    """
-    Обработчик кнопки "Автоматически"
-    """
+    user_id = callback.from_user.id
+
     # Получаем пользователя
-    user = await get_user(session, callback.from_user.id)
-    
-    # Отправляем сообщение о генерации плана
-    await callback.message.edit_text(
-        "<b>🤖 Генерация плана питания</b>\n\n"
-        "Пожалуйста, подожди, я создаю для тебя оптимальный план питания на основе твоих данных...",
-        reply_markup=None
-    )
-    
-    # Рассчитываем целевые показатели калорий и макронутриентов
-    calories, macros = calculate_calories_and_macros(user)
-    
-    # Генерируем план питания
-    nutrition_plan = await generate_nutrition_plan(session, user, calories, macros)
-    
-    if nutrition_plan:
-        # Если план успешно создан, отображаем информацию о нем
-        text = f"<b>✅ План питания создан!</b>\n\n"
-        text += f"<b>{nutrition_plan.name}</b>\n"
-        text += f"{nutrition_plan.description or ''}\n\n"
-        
-        # Добавляем информацию о калориях и макросах
-        text += f"<b>Целевые показатели:</b>\n"
-        text += f"Калории: {nutrition_plan.calories_target} ккал\n"
-        text += f"Белки: {nutrition_plan.protein_target} г\n"
-        text += f"Жиры: {nutrition_plan.fat_target} г\n"
-        text += f"Углеводы: {nutrition_plan.carbs_target} г\n\n"
-        
-        # Добавляем информацию о приемах пищи
-        meals = nutrition_plan.meals
-        
-        if meals:
-            text += f"<b>Приемы пищи:</b>\n"
-            
-            # Сортируем приемы пищи по типу
-            meal_order = {
-                MealType.BREAKFAST: 1,
-                MealType.LUNCH: 2,
-                MealType.DINNER: 3,
-                MealType.SNACK: 4,
-                MealType.PRE_WORKOUT: 5,
-                MealType.POST_WORKOUT: 6
-            }
-            
-            sorted_meals = sorted(meals, key=lambda m: meal_order.get(m.meal_type, 99))
-            
-            for meal in sorted_meals:
-                # Получаем название типа приема пищи на русском
-                meal_type_name = get_meal_type_name(meal.meal_type)
-                
-                text += f"\n<b>{meal_type_name}</b> ({meal.time or 'время не указано'}):\n"
-                
-                # Если есть рецепты в приеме пищи
-                if meal.recipes:
-                    for recipe in meal.recipes:
-                        text += f"• {recipe.name}\n"
-                else:
-                    text += "Нет рецептов\n"
-        
-        # Создаем клавиатуру с действиями
-        builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(
-            text="📋 Посмотреть подробнее",
-            callback_data=f"view_nutrition_plan_{nutrition_plan.id}"
-        ))
-        builder.row(InlineKeyboardButton(
-            text="✏️ Редактировать план",
-            callback_data=f"edit_nutrition_plan_{nutrition_plan.id}"
-        ))
-        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="nutrition_menu"))
-        
-        await callback.message.edit_text(text, reply_markup=builder.as_markup())
-    else:
-        # Если не удалось создать план
+    result = await session.execute(select(User).where(User.telegram_id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        await callback.answer("Пользователь не найден. Пожалуйста, зарегистрируйтесь.", show_alert=True)
+        return
+
+    # Проверяем, заполнен ли профиль
+    if not user.height or not user.weight or not user.gender or not user.birthdate:
+        await callback.answer("Пожалуйста, заполните свой профиль сначала.", show_alert=True)
         await callback.message.edit_text(
-            "<b>❌ Ошибка</b>\n\n"
-            "К сожалению, не удалось создать план питания автоматически.\n\n"
-            "Попробуй создать план вручную или обратись в поддержку.",
-            reply_markup=back_keyboard("nutrition_menu")
+            "Для создания плана питания необходимо заполнить профиль с основными данными.",
+            reply_markup=profile_setup_keyboard("gender")
         )
-    
-    await callback.answer()
+        return
+
+    await callback.answer("Генерация плана питания...")
+
+    # Рассчитываем калории и макронутриенты
+    calories, macros = calculate_calories_and_macros(user)
+
+    # Создаем план питания
+    nutrition_plan = await generate_nutrition_plan(session, user, calories, macros)
+
+    # Получаем приемы пищи явным запросом
+    meals_query = select(Meal).where(Meal.nutrition_plan_id == nutrition_plan.id)
+    result = await session.execute(meals_query)
+    meals = result.scalars().all()
+
+    # Формируем сообщение с планом питания
+    message_text = (
+        f"<b>🍽️ Ваш план питания</b>\n\n"
+        f"Целевые показатели:\n"
+        f"• Калории: {nutrition_plan.calories_target} ккал\n"
+        f"• Белки: {nutrition_plan.protein_target} г\n"
+        f"• Жиры: {nutrition_plan.fat_target} г\n"
+        f"• Углеводы: {nutrition_plan.carbs_target} г\n\n"
+        f"<b>Приемы пищи:</b>\n"
+    )
+
+    # Добавляем информацию о каждом приеме пищи
+    for meal in meals:
+        meal_type_name = {
+            MealType.BREAKFAST: "Завтрак",
+            MealType.LUNCH: "Обед",
+            MealType.DINNER: "Ужин",
+            MealType.SNACK: "Перекус",
+            MealType.PRE_WORKOUT: "Перед тренировкой",
+            MealType.POST_WORKOUT: "После тренировки"
+        }.get(meal.meal_type, "Прием пищи")
+
+        message_text += f"\n<b>{meal_type_name} ({meal.time})</b>\n"
+
+        # Получаем рецепты для приема пищи
+        recipes_query = select(Recipe).join(meal_recipe).where(meal_recipe.c.meal_id == meal.id)
+        result = await session.execute(recipes_query)
+        recipes = result.scalars().all()
+
+        if recipes:
+            for recipe in recipes:
+                message_text += f"• {recipe.name}\n"
+        else:
+            message_text += "• Нет рецептов\n"
+
+    await callback.message.edit_text(
+        message_text,
+        reply_markup=nutrition_menu_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
 
 
 @router.callback_query(F.data == "create_nutrition_manual")
@@ -833,7 +827,7 @@ async def process_nutrition_stats(callback: CallbackQuery, session: AsyncSession
         
         for meal in nutrition_plan.meals:
             for recipe in meal.recipes:
-                calories, protein, fat, carbs = await get_recipe_nutrition(recipe)
+                calories, protein, fat, carbs = await get_recipe_nutrition(session, recipe)
                 total_calories += calories
                 total_protein += protein
                 total_fat += fat
@@ -880,35 +874,32 @@ async def get_user(session: AsyncSession, telegram_id: int) -> User:
     return user
 
 
-async def get_recipe_nutrition(recipe: Recipe) -> tuple[float, float, float, float]:
+async def get_recipe_nutrition(session, recipe):
     """
-    Рассчитывает пищевую ценность рецепта на порцию
-    
+    Получает информацию о калориях и макронутриентах рецепта
+
+    :param session: Сессия базы данных
     :param recipe: Рецепт
-    :return: Калории, белки, жиры, углеводы
+    :return: Кортеж (калории, белки, жиры, углеводы)
     """
-    calories = 0
-    protein = 0
-    fat = 0
-    carbs = 0
-    
-    for assoc in recipe.recipe_product_associations:
-        product = assoc.product
-        amount = assoc.amount / 100  # Переводим в сотни грамм (продукты хранят информацию на 100г)
-        
-        calories += product.calories * amount
-        protein += product.protein * amount
-        fat += product.fat * amount
-        carbs += product.carbs * amount
-    
-    # Делим на количество порций
-    if recipe.servings > 0:
-        calories /= recipe.servings
-        protein /= recipe.servings
-        fat /= recipe.servings
-        carbs /= recipe.servings
-    
-    return calories, protein, fat, carbs
+    # Получаем связанные продукты через явный запрос
+    from sqlalchemy import select
+    from app.models.nutrition import Product, recipe_product
+
+    query = select(Product).join(recipe_product).where(recipe_product.c.recipe_id == recipe.id)
+    result = await session.execute(query)
+    products = result.scalars().all()
+
+    if not products:
+        return 0, 0, 0, 0  # Если продуктов нет, возвращаем нули
+
+    # Рассчитываем приблизительные значения по имеющимся продуктам
+    total_calories = sum(product.calories for product in products) / len(products) * 100
+    total_protein = sum(product.protein for product in products) / len(products)
+    total_fat = sum(product.fat for product in products) / len(products)
+    total_carbs = sum(product.carbs for product in products) / len(products)
+
+    return round(total_calories), round(total_protein), round(total_fat), round(total_carbs)
 
 
 def get_meal_type_name(meal_type: MealType) -> str:
